@@ -1,34 +1,34 @@
-using HtmlAgilityPack;
+ï»¿using HtmlAgilityPack;
 using System.Text;
 
 namespace HDYMonitor.Utils
 {
     public class ServerProductModel
     {
-        public string ServerName { get; set; }      // ·şÎñÆ÷Ãû³Æ
-        public string Price { get; set; }           // ¼Û¸ñ
-        public string RenewalInfo { get; set; }     // Ğø·ÑËµÃ÷
-        public bool IsPurchasable { get; set; }     // ÊÇ·ñ¿É¹ºÂò
-        public string StatusMessage { get; set; }   // ×´Ì¬ÎÄ×Ö
+        public string ServerName { get; set; }      // æœåŠ¡å™¨åç§°
+        public string Price { get; set; }           // ä»·æ ¼
+        public string RenewalInfo { get; set; }     // ç»­è´¹è¯´æ˜
+        public bool IsPurchasable { get; set; }     // æ˜¯å¦å¯è´­ä¹°
+        public string StatusMessage { get; set; }   // çŠ¶æ€æ–‡å­—
 
-        // --- ĞÂÔö×Ö¶Î ---
-        public string Core { get; set; }            // ºËĞÄ
-        public string Memory { get; set; }          // ÄÚ´æ
-        public string SystemDisk { get; set; }      // ÏµÍ³ÅÌ
-        public string Bandwidth { get; set; }       // ´ø¿í
+        // --- æ–°å¢å­—æ®µ ---
+        public string Core { get; set; }            // æ ¸å¿ƒ
+        public string Memory { get; set; }          // å†…å­˜
+        public string SystemDisk { get; set; }      // ç³»ç»Ÿç›˜
+        public string Bandwidth { get; set; }       // å¸¦å®½
 
         public override string ToString()
         {
             var sb = new StringBuilder();
-            sb.AppendLine($"Ãû³Æ: {ServerName}");
-            sb.AppendLine($"¼Û¸ñ: {Price} ({RenewalInfo})");
-            sb.AppendLine($"ÅäÖÃ: {Core} | {Memory} | {SystemDisk} | {Bandwidth}");
-            sb.AppendLine($"×´Ì¬: {(IsPurchasable ? "¿É¹ºÂò" : "²»¿É¹ºÂò")} [{StatusMessage}]");
+            sb.AppendLine($"åç§°: {ServerName}");
+            sb.AppendLine($"ä»·æ ¼: {Price} ({RenewalInfo})");
+            sb.AppendLine($"é…ç½®: {Core} | {Memory} | {SystemDisk} | {Bandwidth}");
+            sb.AppendLine($"çŠ¶æ€: {(IsPurchasable ? "å¯è´­ä¹°" : "ä¸å¯è´­ä¹°")} [{StatusMessage}]");
             return sb.ToString();
         }
     }
 
-    // 2. ¸üĞÂ·ÖÎöÀà
+    // 2. æ›´æ–°åˆ†æç±»
     public class HtmlAnalyzer
     {
         public static List<ServerProductModel> ParseHtml(string htmlContent)
@@ -37,7 +37,7 @@ namespace HDYMonitor.Utils
             var doc = new HtmlDocument();
             doc.LoadHtml(htmlContent);
 
-            // ²éÕÒËùÓĞ´ÙÏú¿¨Æ¬
+            // æŸ¥æ‰¾æ‰€æœ‰ä¿ƒé”€å¡ç‰‡
             var cardNodes = doc.DocumentNode.SelectNodes("//div[contains(@class, '-promotion-card')]");
 
             if (cardNodes == null) return results;
@@ -46,9 +46,9 @@ namespace HDYMonitor.Utils
             {
                 var model = new ServerProductModel();
 
-                // --- 1. »ù´¡ĞÅÏ¢ÌáÈ¡ ---
+                // --- 1. åŸºç¡€ä¿¡æ¯æå– ---
                 var nameNode = card.SelectSingleNode(".//h1");
-                model.ServerName = nameNode?.InnerText.Trim() ?? "Î´ÖªÃû³Æ";
+                model.ServerName = nameNode?.InnerText.Trim() ?? "æœªçŸ¥åç§°";
 
                 var priceNode = card.SelectSingleNode(".//span[contains(@class, 'main-price-current')]");
                 if (priceNode != null)
@@ -59,36 +59,36 @@ namespace HDYMonitor.Utils
                 var unitNode = card.SelectSingleNode(".//span[contains(@class, 'price-current-unit')]");
                 model.RenewalInfo = unitNode?.InnerText.Trim() ?? "";
 
-                // --- 2. ÏêÏ¸ÅäÖÃÌáÈ¡ (ĞÂÔöÂß¼­) ---
-                // ²éÕÒ¿¨Æ¬ÄÚËùÓĞµÄ form-container ĞĞ
+                // --- 2. è¯¦ç»†é…ç½®æå– (æ–°å¢é€»è¾‘) ---
+                // æŸ¥æ‰¾å¡ç‰‡å†…æ‰€æœ‰çš„ form-container è¡Œ
                 var configRows = card.SelectNodes(".//div[contains(@class, 'form-container')]");
                 if (configRows != null)
                 {
                     foreach (var row in configRows)
                     {
-                        // ÌáÈ¡±êÌâ (ÀıÈç "ºËĞÄ£º")
+                        // æå–æ ‡é¢˜ (ä¾‹å¦‚ "æ ¸å¿ƒï¼š")
                         var titleNode = row.SelectSingleNode(".//div[@class='form-title']/h5");
-                        // ÌáÈ¡Öµ (ÀıÈç "12H ...")
+                        // æå–å€¼ (ä¾‹å¦‚ "12H ...")
                         var valueNode = row.SelectSingleNode(".//div[contains(@class, 'form-content-data')]//p[contains(@class, 'form-text')]");
 
                         if (titleNode != null && valueNode != null)
                         {
-                            // ÇåÀí±êÌâÖĞµÄÃ°ºÅºÍ¿Õ¸ñ
-                            string title = titleNode.InnerText.Trim().Replace("£º", "").Replace(":", "");
+                            // æ¸…ç†æ ‡é¢˜ä¸­çš„å†’å·å’Œç©ºæ ¼
+                            string title = titleNode.InnerText.Trim().Replace("ï¼š", "").Replace(":", "");
                             string value = valueNode.InnerText.Trim();
 
                             switch (title)
                             {
-                                case "ºËĞÄ":
+                                case "æ ¸å¿ƒ":
                                     model.Core = value;
                                     break;
-                                case "ÄÚ´æ":
+                                case "å†…å­˜":
                                     model.Memory = value;
                                     break;
-                                case "ÏµÍ³ÅÌ":
+                                case "ç³»ç»Ÿç›˜":
                                     model.SystemDisk = value;
                                     break;
-                                case "´ø¿í":
+                                case "å¸¦å®½":
                                     model.Bandwidth = value;
                                     break;
                             }
@@ -96,19 +96,19 @@ namespace HDYMonitor.Utils
                     }
                 }
 
-                // --- 3. ¹ºÂò×´Ì¬ÅĞ¶Ï ---
+                // --- 3. è´­ä¹°çŠ¶æ€åˆ¤æ–­ ---
                 var btnNode = card.SelectSingleNode(".//a[contains(@class, 'form-footer-butt')]");
                 if (btnNode != null)
                 {
                     string btnText = btnNode.InnerText.Trim();
                     string btnClass = btnNode.GetAttributeValue("class", "");
                     model.StatusMessage = btnText;
-                    model.IsPurchasable = !btnClass.Contains("disableButton") && !btnText.Contains("ÊÛóÀ");
+                    model.IsPurchasable = !btnClass.Contains("disableButton") && !btnText.Contains("å”®ç½„");
                 }
                 else
                 {
                     model.IsPurchasable = false;
-                    model.StatusMessage = "Î´ÕÒµ½°´Å¥";
+                    model.StatusMessage = "æœªæ‰¾åˆ°æŒ‰é’®";
                 }
 
                 results.Add(model);
