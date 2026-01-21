@@ -1,5 +1,6 @@
 using Aliyun.Base.Utils;
 using HtmlAgilityPack;
+using System.Linq;
 using System.Text.Json;
 
 namespace HDYMonitor.Services
@@ -9,19 +10,35 @@ namespace HDYMonitor.Services
         private const string DefaultUrlTemplate = "https://www.szhdy.com/cart?action=configureproduct&pid={id}";
         private const int DefaultStartId = 2018;
         private const int DefaultBackwardScanLimit = 200;
-        private const int RequiredMarkerHits = 2;
-        private static readonly string[] ContentMarkers =
+        private static readonly string LabelOs = "\u64cd\u4f5c\u7cfb\u7edf";
+        private static readonly string LabelName = "\u540d\u79f0";
+        private static readonly string[] ConfigFieldLabels =
         {
-            "操作系统",
-            "节点id",
+            "\u8282\u70b9id",
             "CPU",
-            "内存",
-            "系统盘",
-            "带宽",
-            "IP数量",
-            "硬盘模式",
-            "网络类型",
-            "系统版本"
+            "\u5185\u5b58",
+            "\u7cfb\u7edf\u76d8",
+            "\u5e26\u5bbd",
+            "\u7f51\u7edc\u7c7b\u578b",
+            "IP\u6570\u91cf",
+            "\u6570\u636e\u76d8"
+        };
+        private static readonly string[] HeadingDenyList =
+        {
+            "\u4ea7\u54c1\u4e0e\u670d\u52a1",
+            "\u652f\u6301\u4e0e\u670d\u52a1",
+            "\u4e86\u89e3\u6211\u4eec",
+            "\u533a\u57df",
+            "\u8fd4\u56de",
+            "\u6700\u65b0\u901a\u77e5",
+            "\u70ed\u9500\u63a8\u8350"
+        };
+        private static readonly HashSet<string> ValueNoise = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "-",
+            "+",
+            "Image",
+            "\u9009\u62e9\u7248\u672c"
         };
 
         private static bool _initialized;
@@ -33,6 +50,7 @@ namespace HDYMonitor.Services
                 : "/home/app/HDYMonitor/lastConfigId.json");
 
         private sealed record ConfigIdState(int LastId, DateTimeOffset UpdatedAt);
+        private sealed record ConfigDetails(string? Name, IReadOnlyDictionary<string, string> Fields);
 
         public static async Task<FetchActivityResult> CheckAndNotifyAsync(CancellationToken cancellationToken = default)
         {
@@ -61,8 +79,11 @@ namespace HDYMonitor.Services
                 if (checkResult.HasContent)
                 {
                     var url = BuildUrl(nextId);
-                    var title = $"新配置上线 ID={nextId}";
-                    var message = $"{title}\n{url}";
+                    var name = checkResult.Details?.Name;
+                    var title = string.IsNullOrWhiteSpace(name)
+                        ? $"\u65b0\u914d\u7f6e\u4e0a\u7ebf ID={nextId}"
+                        : $"\u65b0\u914d\u7f6e\u4e0a\u7ebf ID={nextId} {name}";
+                    var message = BuildConfigMessage(nextId, url, checkResult.Details);
                     await SendHelper.SendPushDeer(title, message);
                     await SaveLastIdAsync(nextId, cancellationToken);
                     _lastKnownId = nextId;
@@ -129,7 +150,7 @@ namespace HDYMonitor.Services
             return null;
         }
 
-        private static async Task<(bool HasContent, string? Title)> CheckIdHasContentAsync(HttpClient httpClient, int id, CancellationToken cancellationToken)
+        private static async Task<(bool HasContent, ConfigDetails? Details)> CheckIdHasContentAsync(HttpClient httpClient, int id, CancellationToken cancellationToken)
         {
             var url = BuildUrl(id);
             using var response = await httpClient.GetAsync(url, cancellationToken);
@@ -143,21 +164,212 @@ namespace HDYMonitor.Services
             var doc = new HtmlDocument();
             doc.LoadHtml(html);
 
-            var text = doc.DocumentNode.InnerText ?? string.Empty;
-            var hits = 0;
-            foreach (var marker in ContentMarkers)
+            if (!HasConfigContent(doc))
             {
-                if (text.Contains(marker, StringComparison.OrdinalIgnoreCase))
+                return (false, null);
+            }
+
+            var details = ExtractConfigDetails(doc);
+            return (true, details);
+        }
+
+        private static bool HasConfigContent(HtmlDocument doc)
+        {
+            var osNode = FindLabelNode(doc, LabelOs);
+            var cpuNode = FindLabelNode(doc, "CPU");
+            return osNode != null && cpuNode != null;
+        }
+
+        private static ConfigDetails ExtractConfigDetails(HtmlDocument doc)
+        {
+            var anchorNode = FindLabelNode(doc, LabelOs);
+            var name = ExtractProductName(doc, anchorNode);
+            var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var label in ConfigFieldLabels)
+            {
+                var labelNode = FindLabelNode(doc, label);
+                if (labelNode is null)
                 {
-                    hits++;
-                    if (hits >= RequiredMarkerHits)
+                    continue;
+                }
+
+                var value = FindNextMeaningfulText(labelNode);
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    fields[label] = value;
+                }
+            }
+
+            return new ConfigDetails(name, fields);
+        }
+
+        private static string BuildConfigMessage(int id, string url, ConfigDetails? details)
+        {
+            var lines = new List<string>
+            {
+                $"ID: {id}"
+            };
+
+            if (details != null)
+            {
+                if (!string.IsNullOrWhiteSpace(details.Name))
+                {
+                    lines.Add($"{LabelName}: {details.Name}");
+                }
+
+                foreach (var label in ConfigFieldLabels)
+                {
+                    if (details.Fields.TryGetValue(label, out var value))
                     {
-                        return (true, null);
+                        lines.Add($"{label}: {value}");
                     }
                 }
             }
 
-            return (false, null);
+            lines.Add(url);
+            return string.Join("\n", lines);
+        }
+
+        private static HtmlNode? FindLabelNode(HtmlDocument doc, string label)
+        {
+            var node = FindExactLabelNode(doc, label);
+            if (node != null)
+            {
+                return node;
+            }
+
+            node = FindExactLabelNode(doc, $"{label}:");
+            if (node != null)
+            {
+                return node;
+            }
+
+            return FindExactLabelNode(doc, $"{label}\uFF1A");
+        }
+
+        private static HtmlNode? FindExactLabelNode(HtmlDocument doc, string label)
+        {
+            var node = doc.DocumentNode.SelectSingleNode($"//*[not(*) and normalize-space(.)='{label}']");
+            if (node != null)
+            {
+                return node;
+            }
+
+            return doc.DocumentNode.SelectSingleNode($"//*[normalize-space(.)='{label}']");
+        }
+
+        private static string? ExtractProductName(HtmlDocument doc, HtmlNode? anchorNode)
+        {
+            var candidate = FindNameByClass(doc);
+            if (!string.IsNullOrWhiteSpace(candidate))
+            {
+                return candidate;
+            }
+
+            var headings = doc.DocumentNode.SelectNodes("//h1|//h2|//h3|//h4");
+            if (headings == null || headings.Count == 0)
+            {
+                return null;
+            }
+
+            var anchorPos = anchorNode?.StreamPosition ?? int.MaxValue;
+            foreach (var heading in headings.OrderByDescending(h => h.StreamPosition))
+            {
+                if (heading.StreamPosition > anchorPos)
+                {
+                    continue;
+                }
+
+                var text = NormalizeText(heading.InnerText);
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    continue;
+                }
+
+                if (HeadingDenyList.Any(blocked => string.Equals(blocked, text, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                return text;
+            }
+
+            return null;
+        }
+
+        private static string? FindNameByClass(HtmlDocument doc)
+        {
+            var node = doc.DocumentNode.SelectSingleNode("//*[contains(translate(@class,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'product') and contains(translate(@class,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'name')]");
+            if (node != null)
+            {
+                return NormalizeText(node.InnerText);
+            }
+
+            node = doc.DocumentNode.SelectSingleNode("//*[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'product') and contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'name')]");
+            return node == null ? null : NormalizeText(node.InnerText);
+        }
+
+        private static string? FindNextMeaningfulText(HtmlNode node)
+        {
+            for (var next = NextNode(node); next != null; next = NextNode(next))
+            {
+                if (next.NodeType != HtmlNodeType.Text && next.NodeType != HtmlNodeType.Element)
+                {
+                    continue;
+                }
+
+                var text = NormalizeText(next.InnerText);
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    continue;
+                }
+
+                if (ValueNoise.Contains(text))
+                {
+                    continue;
+                }
+
+                if (string.Equals(text, NormalizeText(node.InnerText), StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                return text;
+            }
+
+            return null;
+        }
+
+        private static HtmlNode? NextNode(HtmlNode node)
+        {
+            if (node.FirstChild != null)
+            {
+                return node.FirstChild;
+            }
+
+            var current = node;
+            while (current != null)
+            {
+                if (current.NextSibling != null)
+                {
+                    return current.NextSibling;
+                }
+
+                current = current.ParentNode;
+            }
+
+            return null;
+        }
+
+        private static string NormalizeText(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            return string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         }
 
         private static string BuildUrl(int id)
