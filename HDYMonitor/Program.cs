@@ -74,7 +74,19 @@ static int GetIntervalSeconds(string[] args)
 static async Task<FetchActivityResult> RunOnceAsync(CancellationToken cancellationToken)
 {
     Console.WriteLine($"Run started at {DateTimeOffset.Now:O}");
-    var result = await FetchActivityService.FetchAndProcessActivityAsync(cancellationToken);
+    var activityResult = await FetchActivityService.FetchAndProcessActivityAsync(cancellationToken);
+    var configResult = await FetchConfigIdService.CheckAndNotifyAsync(cancellationToken);
+
+    if (!configResult.Success)
+    {
+        Console.WriteLine($"Config ID check failed. StatusCode={configResult.StatusCode}. Message={configResult.Message}");
+    }
+
+    var success = activityResult.Success && configResult.Success;
+    var statusCode = activityResult.Success ? configResult.StatusCode : activityResult.StatusCode;
+    var message = $"{activityResult.Message}; {configResult.Message}";
+    var result = new FetchActivityResult(success, statusCode, message);
+
     Console.WriteLine($"Run finished. StatusCode={result.StatusCode}. Message={result.Message}");
     return result;
 }
