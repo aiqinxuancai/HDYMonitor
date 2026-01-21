@@ -3,9 +3,6 @@ version: "3.9"
 services:
   hdymonitor:
     image: ghcr.io/aiqinxauncai/hdymonitor:latest
-    build:
-      context: .
-      dockerfile: Dockerfile
     environment:
       RUN_INTERVAL_SECONDS: "300"
       TARGET_URL: "https://www.szhdy.com/activities/default.html?method=activity&id=11"
