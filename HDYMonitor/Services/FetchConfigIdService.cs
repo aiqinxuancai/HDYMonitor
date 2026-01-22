@@ -1,6 +1,7 @@
 using Aliyun.Base.Utils;
 using HtmlAgilityPack;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 
 namespace HDYMonitor.Services
@@ -33,6 +34,22 @@ namespace HDYMonitor.Services
             "\u6700\u65b0\u901a\u77e5",
             "\u70ed\u9500\u63a8\u8350"
         };
+        private static readonly string[] PriceLabelCandidates =
+        {
+            "\u4ef7\u683c",
+            "\u603b\u8ba1",
+            "\u5408\u8ba1",
+            "\u91d1\u989d",
+            "\u5c0f\u8ba1"
+        };
+        private static readonly string[] PriceClassHints =
+        {
+            "price",
+            "total",
+            "amount",
+            "pay",
+            "subtotal"
+        };
         private static readonly HashSet<string> ValueNoise = new(StringComparer.OrdinalIgnoreCase)
         {
             "-",
@@ -50,7 +67,7 @@ namespace HDYMonitor.Services
                 : "/home/app/HDYMonitor/lastConfigId.json");
 
         private sealed record ConfigIdState(int LastId, DateTimeOffset UpdatedAt);
-        private sealed record ConfigDetails(string? Name, IReadOnlyDictionary<string, string> Fields);
+        private sealed record ConfigDetails(string? Name, string? Price, IReadOnlyDictionary<string, string> Fields);
 
         public static async Task<FetchActivityResult> CheckAndNotifyAsync(CancellationToken cancellationToken = default)
         {
@@ -169,7 +186,7 @@ namespace HDYMonitor.Services
                 return (false, null);
             }
 
-            var details = ExtractConfigDetails(doc);
+            var details = ExtractConfigDetails(doc, html);
             return (true, details);
         }
 
@@ -180,10 +197,11 @@ namespace HDYMonitor.Services
             return osNode != null && cpuNode != null;
         }
 
-        private static ConfigDetails ExtractConfigDetails(HtmlDocument doc)
+        private static ConfigDetails ExtractConfigDetails(HtmlDocument doc, string html)
         {
             var anchorNode = FindLabelNode(doc, LabelOs);
             var name = ExtractProductName(doc, anchorNode);
+            var price = ExtractPrice(doc, html);
             var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var label in ConfigFieldLabels)
@@ -201,7 +219,7 @@ namespace HDYMonitor.Services
                 }
             }
 
-            return new ConfigDetails(name, fields);
+            return new ConfigDetails(name, price, fields);
         }
 
         private static string BuildConfigMessage(int id, string url, ConfigDetails? details)
@@ -218,6 +236,11 @@ namespace HDYMonitor.Services
                     lines.Add($"{LabelName}: {details.Name}");
                 }
 
+                if (!string.IsNullOrWhiteSpace(details.Price))
+                {
+                    lines.Add($"\u4ef7\u683c: {details.Price}");
+                }
+
                 foreach (var label in ConfigFieldLabels)
                 {
                     if (details.Fields.TryGetValue(label, out var value))
@@ -229,6 +252,109 @@ namespace HDYMonitor.Services
 
             lines.Add(url);
             return string.Join("\n", lines);
+        }
+
+        private static string? ExtractPrice(HtmlDocument doc, string html)
+        {
+            var priceNode = FindNodeByHints(doc, PriceClassHints);
+            if (priceNode != null)
+            {
+                var price = ExtractPriceFromNode(priceNode, allowBareNumber: true);
+                if (!string.IsNullOrWhiteSpace(price))
+                {
+                    return price;
+                }
+            }
+
+            foreach (var label in PriceLabelCandidates)
+            {
+                var labelNode = FindLabelNode(doc, label);
+                if (labelNode == null)
+                {
+                    continue;
+                }
+
+                var value = FindNextMeaningfulText(labelNode);
+                var price = ExtractPriceFromText(value, allowBareNumber: true);
+                if (!string.IsNullOrWhiteSpace(price))
+                {
+                    return price;
+                }
+            }
+
+            var match = Regex.Match(html, "data-current\\s*=\\s*[\"']?(?<value>[0-9]+(?:\\.[0-9]+)?)[\"']?", RegexOptions.IgnoreCase);
+            if (match.Success)
+            {
+                return match.Groups["value"].Value;
+            }
+
+            match = Regex.Match(html, "\"(?:price|total|amount)\"\\s*:\\s*\"?(?<value>[0-9]+(?:\\.[0-9]+)?)\"?", RegexOptions.IgnoreCase);
+            if (match.Success)
+            {
+                return match.Groups["value"].Value;
+            }
+
+            return null;
+        }
+
+        private static HtmlNode? FindNodeByHints(HtmlDocument doc, string[] hints)
+        {
+            var predicates = string.Join(" or ", hints.Select(h =>
+                $"contains(translate(@class,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'{h}') or contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'{h}')"));
+            if (string.IsNullOrWhiteSpace(predicates))
+            {
+                return null;
+            }
+
+            return doc.DocumentNode.SelectSingleNode($"//*[{predicates}]");
+        }
+
+        private static string? ExtractPriceFromNode(HtmlNode node, bool allowBareNumber)
+        {
+            foreach (var attr in node.Attributes)
+            {
+                if (attr == null)
+                {
+                    continue;
+                }
+
+                var name = attr.Name ?? string.Empty;
+                if (name.Contains("price", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("amount", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("total", StringComparison.OrdinalIgnoreCase))
+                {
+                    var price = ExtractPriceFromText(attr.Value, allowBareNumber);
+                    if (!string.IsNullOrWhiteSpace(price))
+                    {
+                        return price;
+                    }
+                }
+            }
+
+            return ExtractPriceFromText(node.InnerText, allowBareNumber);
+        }
+
+        private static string? ExtractPriceFromText(string? text, bool allowBareNumber)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return null;
+            }
+
+            var normalized = NormalizeText(text);
+            var match = Regex.Match(normalized, "(?:\\u00a5|\\uffe5)\\s*(?<value>[0-9]+(?:\\.[0-9]+)?)|(?<value2>[0-9]+(?:\\.[0-9]+)?)\\s*\\u5143");
+            if (match.Success)
+            {
+                return match.Value;
+            }
+
+            if (!allowBareNumber)
+            {
+                return null;
+            }
+
+            match = Regex.Match(normalized, "^[0-9]+(?:\\.[0-9]+)?$");
+            return match.Success ? match.Value : null;
         }
 
         private static HtmlNode? FindLabelNode(HtmlDocument doc, string label)
