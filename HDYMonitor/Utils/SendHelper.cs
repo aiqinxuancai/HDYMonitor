@@ -38,6 +38,7 @@ namespace Aliyun.Base.Utils
             for (var i = 0; i < pushDeerKeys.Count; i++)
             {
                 var pushDeerKey = pushDeerKeys[i];
+                var maskedPushDeerKey = MaskPushDeerKey(pushDeerKey);
                 try
                 {
                     var postData = new FormUrlEncodedContent(new Dictionary<string, string>()
@@ -50,16 +51,39 @@ namespace Aliyun.Base.Utils
                     var ret = await client.PostAsync(url, postData);
 
                     ret.EnsureSuccessStatusCode();
-                    Console.WriteLine($"PushDeer推送成功，第{i + 1}/{pushDeerKeys.Count}个Key。");
+                    Console.WriteLine($"PushDeer推送成功，第{i + 1}/{pushDeerKeys.Count}个Key，Key: {maskedPushDeerKey}");
                     Console.WriteLine(await ret.Content.ReadAsStringAsync());
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"PushDeer推送失败，第{i + 1}/{pushDeerKeys.Count}个Key。");
+                    Console.WriteLine($"PushDeer推送失败，第{i + 1}/{pushDeerKeys.Count}个Key，Key: {maskedPushDeerKey}");
                     Console.WriteLine(ex.ToString());
                 }
             }
 
+        }
+
+        private static string MaskPushDeerKey(string pushDeerKey)
+        {
+            if (string.IsNullOrWhiteSpace(pushDeerKey))
+            {
+                return "***";
+            }
+
+            var key = pushDeerKey.Trim();
+            const int visibleChars = 3;
+
+            if (key.Length <= visibleChars * 2)
+            {
+                if (key.Length == 1)
+                {
+                    return "***";
+                }
+
+                return $"{key[0]}***{key[^1]}";
+            }
+
+            return $"{key[..visibleChars]}***{key[^visibleChars..]}";
         }
 
         public static async Task PostMessageToMailAliyun(string title, string content)
