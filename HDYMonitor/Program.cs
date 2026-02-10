@@ -1,5 +1,7 @@
 ﻿using HDYMonitor.Services;
 
+using Aliyun.Base.Utils;
+
 Console.WriteLine("HDYMonitor console starting.");
 
 var intervalSeconds = GetIntervalSeconds(args);
@@ -9,6 +11,8 @@ Console.CancelKeyPress += (_, e) =>
     e.Cancel = true;
     cts.Cancel();
 };
+
+await SendStartupPushDeerTestAsync();
 
 if (intervalSeconds <= 0)
 {
@@ -89,4 +93,15 @@ static async Task<FetchActivityResult> RunOnceAsync(CancellationToken cancellati
 
     Console.WriteLine($"Run finished. StatusCode={result.StatusCode}. Message={result.Message}");
     return result;
+}
+
+static async Task SendStartupPushDeerTestAsync()
+{
+    Console.WriteLine("Sending startup PushDeer test message...");
+
+    var now = DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss zzz");
+    var testTitle = "HDYMonitor 启动测试";
+    var testMessage = $"程序已启动，时间：{now}";
+
+    await SendHelper.SendPushDeer(testTitle, testMessage);
 }
