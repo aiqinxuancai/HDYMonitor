@@ -12,7 +12,7 @@ services:
       CONFIG_ID_START: "2018"
       CONFIG_ID_BACKWARD_SCAN_LIMIT: "200"
       CONFIG_ID_STORAGE_PATH: "/data/lastConfigId.json"
-      PUSHDEER_KEY: ""
+      PUSHDEER_KEY: "" # 支持多个，使用英文逗号/分号/空格分隔
       ALIYUNAPI_KEY: ""
       ALIYUNAPI_SECRET: ""
     volumes:

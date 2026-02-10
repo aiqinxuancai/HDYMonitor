@@ -13,35 +13,51 @@ namespace Aliyun.Base.Utils
         {
             Console.WriteLine($"SendPushDeer {msg}");
 
-            string? _pushDeerKey = Environment.GetEnvironmentVariable("PUSHDEER_KEY");
+            string? pushDeerKeysValue = Environment.GetEnvironmentVariable("PUSHDEER_KEY");
 
-            if (string.IsNullOrEmpty(_pushDeerKey))
+            if (string.IsNullOrWhiteSpace(pushDeerKeysValue))
             {
                 Console.WriteLine("主程序：未配置PushDeer的Key，跳过发送PushDeer。");
                 return;
             }
 
+            var pushDeerKeys = pushDeerKeysValue
+                .Split(new[] { ',', ';', '\n', '\r', ' ' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (pushDeerKeys.Count == 0)
+            {
+                Console.WriteLine("主程序：PUSHDEER_KEY配置为空，跳过发送PushDeer。");
+                return;
+            }
+
             HttpClient client = new HttpClient();
 
-            try
+            var url = "https://api2.pushdeer.com/message/push";
+            for (var i = 0; i < pushDeerKeys.Count; i++)
             {
-                var url = "https://api2.pushdeer.com/message/push";
-
-                var postData = new FormUrlEncodedContent(new Dictionary<string, string>()
+                var pushDeerKey = pushDeerKeys[i];
+                try
+                {
+                    var postData = new FormUrlEncodedContent(new Dictionary<string, string>()
                     {
-                        {"pushkey" , _pushDeerKey },
+                        {"pushkey" , pushDeerKey },
                         {"text" , title },
                         {"desp" , msg },
                     });
 
-                var ret = await client.PostAsync(url, postData);
+                    var ret = await client.PostAsync(url, postData);
 
-                ret.EnsureSuccessStatusCode();
-                Console.WriteLine(await ret.Content.ReadAsStringAsync());
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex.ToString());
+                    ret.EnsureSuccessStatusCode();
+                    Console.WriteLine($"PushDeer推送成功，第{i + 1}/{pushDeerKeys.Count}个Key。");
+                    Console.WriteLine(await ret.Content.ReadAsStringAsync());
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"PushDeer推送失败，第{i + 1}/{pushDeerKeys.Count}个Key。");
+                    Console.WriteLine(ex.ToString());
+                }
             }
 
         }
