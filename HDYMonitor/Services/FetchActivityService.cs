@@ -1,4 +1,6 @@
 ﻿using HDYMonitor.Utils;
+using HtmlAgilityPack;
+using System.Linq;
 using System.Text.Json;
 
 namespace HDYMonitor.Services
@@ -7,6 +9,8 @@ namespace HDYMonitor.Services
 
     public class FetchActivityService
     {
+        private const string DefaultNewestActivityUrl = "https://www.szhdy.com/newestactivity.html";
+
         public static async Task<FetchActivityResult> FetchAndProcessActivityAsync(CancellationToken cancellationToken = default)
         {
             try
@@ -38,42 +42,64 @@ namespace HDYMonitor.Services
                     httpClient.DefaultRequestHeaders.Add("Cache-Control", "no-cache");
                     httpClient.DefaultRequestHeaders.Add("Pragma", "no-cache");
 
-                    var url = Environment.GetEnvironmentVariable("TARGET_URL") ?? "https://www.szhdy.com/activities/default.html?method=activity&id=11";
-                    Console.WriteLine($"[HTTP] GET {url}");
-                    var response = await httpClient.GetAsync(url, cancellationToken);
+                    var newestActivityUrl = Environment.GetEnvironmentVariable("NEWEST_ACTIVITY_URL") ?? DefaultNewestActivityUrl;
+                    Console.WriteLine($"[HTTP] GET {newestActivityUrl}");
+                    using var newestActivityResponse = await httpClient.GetAsync(newestActivityUrl, cancellationToken);
+                    var newestActivityHtml = await newestActivityResponse.Content.ReadAsStringAsync(cancellationToken);
+                    Console.WriteLine($"Status ({newestActivityUrl}): {newestActivityResponse.StatusCode}");
 
-                    var htmlContent = await response.Content.ReadAsStringAsync(cancellationToken);
-                    Console.WriteLine($"Status: {response.StatusCode}");
-
-                    // 检测是否是Cloudflare挑战页面
-                    if (htmlContent.Contains("Just a moment") || htmlContent.Contains("challenge-platform") || htmlContent.Contains("__cf_chl_opt"))
+                    if (IsCloudflareChallenge(newestActivityHtml))
                     {
-                        var solutions = new[]
+                        return BuildCloudflareResult();
+                    }
+
+                    if (!newestActivityResponse.IsSuccessStatusCode)
+                    {
+                        return new FetchActivityResult(
+                            false,
+                            (int)newestActivityResponse.StatusCode,
+                            $"Error fetching newest activity list: {newestActivityResponse.ReasonPhrase}");
+                    }
+
+                    var activityUrls = ExtractOngoingActivityUrls(newestActivityHtml, newestActivityUrl);
+                    if (activityUrls.Count == 0)
+                    {
+                        return new FetchActivityResult(false, 404, "No ongoing activities found on newestactivity page.");
+                    }
+
+                    Console.WriteLine($"Found {activityUrls.Count} ongoing activity page(s): {string.Join(", ", activityUrls)}");
+
+                    var allServers = new List<ServerProductModel>();
+                    foreach (var activityUrl in activityUrls)
+                    {
+                        Console.WriteLine($"[HTTP] GET {activityUrl}");
+                        using var activityResponse = await httpClient.GetAsync(activityUrl, cancellationToken);
+                        var activityHtml = await activityResponse.Content.ReadAsStringAsync(cancellationToken);
+                        Console.WriteLine($"Status ({activityUrl}): {activityResponse.StatusCode}");
+
+                        if (IsCloudflareChallenge(activityHtml))
                         {
-                            "1. 使用Selenium/Playwright等浏览器自动化工具(可执行JavaScript解决挑战)",
-                            "2. 使用FlareSolverr等专门的Cloudflare绕过服务 (https://github.com/FlareSolverr/FlareSolverr)",
-                            "3. 使用Puppeteer-Sharp在C#中模拟真实浏览器",
-                            "4. 使用Truth Social官方API并提供访问令牌(如果可用)",
-                            "5. 使用代理服务或轮换IP地址",
-                            "6. 考虑使用云函数/无服务器函数来分散请求"
-                        };
-                        return new FetchActivityResult(false, 503, "Cloudflare Protection Detected", solutions);
+                            return BuildCloudflareResult();
+                        }
+
+                        if (!activityResponse.IsSuccessStatusCode)
+                        {
+                            return new FetchActivityResult(
+                                false,
+                                (int)activityResponse.StatusCode,
+                                $"Error fetching activity page {activityUrl}: {activityResponse.ReasonPhrase}");
+                        }
+
+                        var servers = HtmlAnalyzer.ParseHtml(activityHtml);
+                        Console.WriteLine($"活动页面解析到 {servers.Count} 个产品：{activityUrl}");
+                        allServers.AddRange(servers);
                     }
 
-                    if (response.IsSuccessStatusCode)
-                    {
-                        List<ServerProductModel> servers = HtmlAnalyzer.ParseHtml(htmlContent);
+                    var mergedServers = MergeServers(allServers);
+                    Console.WriteLine($"共解析到 {mergedServers.Count} 个产品（原始 {allServers.Count} 个，去重后）：{JsonSerializer.Serialize(mergedServers)}");
 
-                        Console.WriteLine($"共解析到 {servers.Count} 个产品：{JsonSerializer.Serialize(servers)}");
-
-                        await ServerManager.CheckAndNotifyAsync(servers);
-
-                        return new FetchActivityResult(true, 200, "执行成功");
-                    }
-                    else
-                    {
-                        return new FetchActivityResult(false, (int)response.StatusCode, $"Error fetching data: {response.ReasonPhrase}");
-                    }
+                    await ServerManager.CheckAndNotifyAsync(mergedServers);
+                    return new FetchActivityResult(true, 200, $"执行成功。活动页数量: {activityUrls.Count}, 产品数量: {mergedServers.Count}");
                 }
             }
             catch (Exception ex)
@@ -81,5 +107,115 @@ namespace HDYMonitor.Services
                 return new FetchActivityResult(false, 500, $"Internal server error: {ex.Message}");
             }
         }
+
+        private static bool IsCloudflareChallenge(string htmlContent)
+        {
+            return htmlContent.Contains("Just a moment", StringComparison.OrdinalIgnoreCase)
+                || htmlContent.Contains("challenge-platform", StringComparison.OrdinalIgnoreCase)
+                || htmlContent.Contains("__cf_chl_opt", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static FetchActivityResult BuildCloudflareResult()
+        {
+            var solutions = new[]
+            {
+                "1. 使用Selenium/Playwright等浏览器自动化工具(可执行JavaScript解决挑战)",
+                "2. 使用FlareSolverr等专门的Cloudflare绕过服务 (https://github.com/FlareSolverr/FlareSolverr)",
+                "3. 使用Puppeteer-Sharp在C#中模拟真实浏览器",
+                "4. 使用Truth Social官方API并提供访问令牌(如果可用)",
+                "5. 使用代理服务或轮换IP地址",
+                "6. 考虑使用云函数/无服务器函数来分散请求"
+            };
+
+            return new FetchActivityResult(false, 503, "Cloudflare Protection Detected", solutions);
+        }
+
+        private static List<string> ExtractOngoingActivityUrls(string htmlContent, string newestActivityUrl)
+        {
+            var urls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var doc = new HtmlDocument();
+            doc.LoadHtml(htmlContent);
+
+            var baseUri = new Uri(newestActivityUrl);
+
+            var ongoingNodes = doc.DocumentNode.SelectNodes(
+                "//a[contains(concat(' ', normalize-space(@class), ' '), ' activity-item ') and translate(normalize-space(@data-status), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='ongoing']");
+
+            AddActivityLinks(ongoingNodes, baseUri, urls);
+
+            if (urls.Count == 0)
+            {
+                var statusNodes = doc.DocumentNode.SelectNodes(
+                    "//p[contains(concat(' ', normalize-space(@class), ' '), ' status_text ') and contains(normalize-space(.), '进行中')]");
+
+                if (statusNodes != null)
+                {
+                    foreach (var statusNode in statusNodes)
+                    {
+                        var anchorNode = statusNode.SelectSingleNode("ancestor::a[contains(concat(' ', normalize-space(@class), ' '), ' activity-item ')]");
+                        AddActivityLink(anchorNode, baseUri, urls);
+                    }
+                }
+            }
+
+            return urls.OrderBy(url => url, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        private static void AddActivityLinks(HtmlNodeCollection? nodes, Uri baseUri, HashSet<string> urls)
+        {
+            if (nodes == null)
+            {
+                return;
+            }
+
+            foreach (var node in nodes)
+            {
+                AddActivityLink(node, baseUri, urls);
+            }
+        }
+
+        private static void AddActivityLink(HtmlNode? node, Uri baseUri, HashSet<string> urls)
+        {
+            var href = node?.GetAttributeValue("href", string.Empty);
+            if (string.IsNullOrWhiteSpace(href))
+            {
+                return;
+            }
+
+            if (Uri.TryCreate(baseUri, href, out var absoluteUri))
+            {
+                urls.Add(absoluteUri.ToString());
+            }
+        }
+
+        private static List<ServerProductModel> MergeServers(List<ServerProductModel> servers)
+        {
+            var merged = new Dictionary<string, ServerProductModel>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var server in servers)
+            {
+                var key = string.Join("|",
+                    server.ServerName ?? string.Empty,
+                    server.Price ?? string.Empty,
+                    server.Core ?? string.Empty,
+                    server.Memory ?? string.Empty,
+                    server.SystemDisk ?? string.Empty,
+                    server.Bandwidth ?? string.Empty);
+
+                if (!merged.TryGetValue(key, out var existing))
+                {
+                    merged[key] = server;
+                    continue;
+                }
+
+                if (!existing.IsPurchasable && server.IsPurchasable)
+                {
+                    merged[key] = server;
+                }
+            }
+
+            return merged.Values.ToList();
+        }
     }
 }
+
