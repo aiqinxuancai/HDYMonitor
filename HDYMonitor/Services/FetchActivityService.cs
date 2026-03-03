@@ -10,6 +10,10 @@ namespace HDYMonitor.Services
     public class FetchActivityService
     {
         private const string DefaultNewestActivityUrl = "https://www.szhdy.com/newestactivity.html";
+        private const int DefaultNewestActivityRefreshSeconds = 600;
+        private static readonly SemaphoreSlim ActivityRefreshLock = new(1, 1);
+        private static DateTimeOffset _lastActivityRefreshAt = DateTimeOffset.MinValue;
+        private static List<string> _cachedActivityUrls = new();
 
         public static async Task<FetchActivityResult> FetchAndProcessActivityAsync(CancellationToken cancellationToken = default)
         {
@@ -42,32 +46,11 @@ namespace HDYMonitor.Services
                     httpClient.DefaultRequestHeaders.Add("Cache-Control", "no-cache");
                     httpClient.DefaultRequestHeaders.Add("Pragma", "no-cache");
 
-                    var newestActivityUrl = Environment.GetEnvironmentVariable("NEWEST_ACTIVITY_URL") ?? DefaultNewestActivityUrl;
-                    Console.WriteLine($"[HTTP] GET {newestActivityUrl}");
-                    using var newestActivityResponse = await httpClient.GetAsync(newestActivityUrl, cancellationToken);
-                    var newestActivityHtml = await newestActivityResponse.Content.ReadAsStringAsync(cancellationToken);
-                    Console.WriteLine($"Status ({newestActivityUrl}): {newestActivityResponse.StatusCode}");
-
-                    if (IsCloudflareChallenge(newestActivityHtml))
+                    var (activityUrls, resolveError) = await ResolveOngoingActivityUrlsAsync(httpClient, cancellationToken);
+                    if (resolveError != null)
                     {
-                        return BuildCloudflareResult();
+                        return resolveError;
                     }
-
-                    if (!newestActivityResponse.IsSuccessStatusCode)
-                    {
-                        return new FetchActivityResult(
-                            false,
-                            (int)newestActivityResponse.StatusCode,
-                            $"Error fetching newest activity list: {newestActivityResponse.ReasonPhrase}");
-                    }
-
-                    var activityUrls = ExtractOngoingActivityUrls(newestActivityHtml, newestActivityUrl);
-                    if (activityUrls.Count == 0)
-                    {
-                        return new FetchActivityResult(false, 404, "No ongoing activities found on newestactivity page.");
-                    }
-
-                    Console.WriteLine($"Found {activityUrls.Count} ongoing activity page(s): {string.Join(", ", activityUrls)}");
 
                     var allServers = new List<ServerProductModel>();
                     foreach (var activityUrl in activityUrls)
@@ -128,6 +111,67 @@ namespace HDYMonitor.Services
             };
 
             return new FetchActivityResult(false, 503, "Cloudflare Protection Detected", solutions);
+        }
+
+        private static async Task<(List<string> ActivityUrls, FetchActivityResult? Error)> ResolveOngoingActivityUrlsAsync(HttpClient httpClient, CancellationToken cancellationToken)
+        {
+            await ActivityRefreshLock.WaitAsync(cancellationToken);
+            try
+            {
+                var refreshSeconds = GetNewestActivityRefreshSeconds();
+                var shouldRefresh = _cachedActivityUrls.Count == 0
+                    || DateTimeOffset.UtcNow - _lastActivityRefreshAt >= TimeSpan.FromSeconds(refreshSeconds);
+
+                if (!shouldRefresh)
+                {
+                    Console.WriteLine($"Using cached ongoing activity URLs (last refresh: {_lastActivityRefreshAt:O}, count: {_cachedActivityUrls.Count}).");
+                    return (new List<string>(_cachedActivityUrls), null);
+                }
+
+                var newestActivityUrl = Environment.GetEnvironmentVariable("NEWEST_ACTIVITY_URL") ?? DefaultNewestActivityUrl;
+                Console.WriteLine($"Refreshing ongoing activity URLs (interval: {refreshSeconds}s).");
+                Console.WriteLine($"[HTTP] GET {newestActivityUrl}");
+                using var newestActivityResponse = await httpClient.GetAsync(newestActivityUrl, cancellationToken);
+                var newestActivityHtml = await newestActivityResponse.Content.ReadAsStringAsync(cancellationToken);
+                Console.WriteLine($"Status ({newestActivityUrl}): {newestActivityResponse.StatusCode}");
+
+                if (IsCloudflareChallenge(newestActivityHtml))
+                {
+                    return (new List<string>(), BuildCloudflareResult());
+                }
+
+                if (!newestActivityResponse.IsSuccessStatusCode)
+                {
+                    var error = new FetchActivityResult(
+                        false,
+                        (int)newestActivityResponse.StatusCode,
+                        $"Error fetching newest activity list: {newestActivityResponse.ReasonPhrase}");
+                    return (new List<string>(), error);
+                }
+
+                var activityUrls = ExtractOngoingActivityUrls(newestActivityHtml, newestActivityUrl);
+                if (activityUrls.Count == 0)
+                {
+                    return (new List<string>(), new FetchActivityResult(false, 404, "No ongoing activities found on newestactivity page."));
+                }
+
+                _cachedActivityUrls = activityUrls;
+                _lastActivityRefreshAt = DateTimeOffset.UtcNow;
+                Console.WriteLine($"Found {activityUrls.Count} ongoing activity page(s): {string.Join(", ", activityUrls)}");
+                return (new List<string>(activityUrls), null);
+            }
+            finally
+            {
+                ActivityRefreshLock.Release();
+            }
+        }
+
+        private static int GetNewestActivityRefreshSeconds()
+        {
+            var envValue = Environment.GetEnvironmentVariable("NEWEST_ACTIVITY_REFRESH_SECONDS");
+            return int.TryParse(envValue, out var seconds) && seconds > 0
+                ? seconds
+                : DefaultNewestActivityRefreshSeconds;
         }
 
         private static List<string> ExtractOngoingActivityUrls(string htmlContent, string newestActivityUrl)
