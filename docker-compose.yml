@@ -6,6 +6,7 @@ services:
     environment:
       RUN_INTERVAL_SECONDS: "300"
       NEWEST_ACTIVITY_URL: "https://www.szhdy.com/newestactivity.html"
+      NEWEST_ACTIVITY_REFRESH_SECONDS: "600"
       STORAGE_PATH: "/data/lastServers.json"
       CONFIG_ID_MONITOR_ENABLED: "true"
       CONFIG_ID_URL_TEMPLATE: "https://www.szhdy.com/cart?action=configureproduct&pid={id}"
