@@ -48,6 +48,7 @@ namespace Aliyun.Base.Utils
                         {"desp" , msg },
                     });
 
+                    Console.WriteLine($"[HTTP] POST {url}");
                     var ret = await client.PostAsync(url, postData);
 
                     ret.EnsureSuccessStatusCode();

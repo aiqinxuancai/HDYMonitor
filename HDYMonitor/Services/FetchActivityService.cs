@@ -39,6 +39,7 @@ namespace HDYMonitor.Services
                     httpClient.DefaultRequestHeaders.Add("Pragma", "no-cache");
 
                     var url = Environment.GetEnvironmentVariable("TARGET_URL") ?? "https://www.szhdy.com/activities/default.html?method=activity&id=11";
+                    Console.WriteLine($"[HTTP] GET {url}");
                     var response = await httpClient.GetAsync(url, cancellationToken);
 
                     var htmlContent = await response.Content.ReadAsStringAsync(cancellationToken);

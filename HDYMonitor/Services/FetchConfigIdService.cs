@@ -170,6 +170,7 @@ namespace HDYMonitor.Services
         private static async Task<(bool HasContent, ConfigDetails? Details)> CheckIdHasContentAsync(HttpClient httpClient, int id, CancellationToken cancellationToken)
         {
             var url = BuildUrl(id);
+            Console.WriteLine($"[HTTP] GET {url}");
             using var response = await httpClient.GetAsync(url, cancellationToken);
             var html = await response.Content.ReadAsStringAsync(cancellationToken);
 

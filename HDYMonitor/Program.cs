@@ -13,19 +13,25 @@ Console.CancelKeyPress += (_, e) =>
 };
 
 await SendStartupPushDeerTestAsync();
+var startupConfigResult = await RunStartupConfigCheckAsync(cts.Token);
+var skipFirstScheduledConfigCheck = startupConfigResult.Success;
 
 if (intervalSeconds <= 0)
 {
-    var result = await RunOnceAsync(cts.Token);
+    var result = await RunOnceAsync(cts.Token, includeConfigCheck: !skipFirstScheduledConfigCheck);
     Environment.ExitCode = result.Success ? 0 : 1;
     return;
 }
 
 Console.WriteLine($"Running every {intervalSeconds} seconds. Press Ctrl+C to stop.");
 
+var isFirstRun = true;
 while (!cts.IsCancellationRequested)
 {
-    var result = await RunOnceAsync(cts.Token);
+    var includeConfigCheck = !(skipFirstScheduledConfigCheck && isFirstRun);
+    var result = await RunOnceAsync(cts.Token, includeConfigCheck);
+    isFirstRun = false;
+
     if (!result.Success)
     {
         Console.WriteLine($"Run failed. StatusCode={result.StatusCode}. Message={result.Message}");
@@ -75,15 +81,22 @@ static int GetIntervalSeconds(string[] args)
     return int.TryParse(envValue, out var envSeconds) ? envSeconds : 0;
 }
 
-static async Task<FetchActivityResult> RunOnceAsync(CancellationToken cancellationToken)
+static async Task<FetchActivityResult> RunOnceAsync(CancellationToken cancellationToken, bool includeConfigCheck = true)
 {
     Console.WriteLine($"Run started at {DateTimeOffset.Now:O}");
     var activityResult = await FetchActivityService.FetchAndProcessActivityAsync(cancellationToken);
-    var configResult = await FetchConfigIdService.CheckAndNotifyAsync(cancellationToken);
-
-    if (!configResult.Success)
+    FetchActivityResult configResult;
+    if (includeConfigCheck)
     {
-        Console.WriteLine($"Config ID check failed. StatusCode={configResult.StatusCode}. Message={configResult.Message}");
+        configResult = await FetchConfigIdService.CheckAndNotifyAsync(cancellationToken);
+        if (!configResult.Success)
+        {
+            Console.WriteLine($"Config ID check failed. StatusCode={configResult.StatusCode}. Message={configResult.Message}");
+        }
+    }
+    else
+    {
+        configResult = new FetchActivityResult(true, 200, "Config ID check skipped (already executed at startup).");
     }
 
     var success = activityResult.Success && configResult.Success;
@@ -93,6 +106,19 @@ static async Task<FetchActivityResult> RunOnceAsync(CancellationToken cancellati
 
     Console.WriteLine($"Run finished. StatusCode={result.StatusCode}. Message={result.Message}");
     return result;
+}
+
+static async Task<FetchActivityResult> RunStartupConfigCheckAsync(CancellationToken cancellationToken)
+{
+    Console.WriteLine("Running startup config ID check...");
+    var configResult = await FetchConfigIdService.CheckAndNotifyAsync(cancellationToken);
+    if (!configResult.Success)
+    {
+        Console.WriteLine($"Startup config ID check failed. StatusCode={configResult.StatusCode}. Message={configResult.Message}");
+    }
+
+    Console.WriteLine($"Startup config ID check finished. StatusCode={configResult.StatusCode}. Message={configResult.Message}");
+    return configResult;
 }
 
 static async Task SendStartupPushDeerTestAsync()
