@@ -5,7 +5,7 @@ services:
     image: ghcr.io/aiqinxauncai/hdymonitor:latest
     environment:
       RUN_INTERVAL_SECONDS: "300"
-      TARGET_URL: "https://www.szhdy.com/activities/default.html?method=activity&id=11"
+      NEWEST_ACTIVITY_URL: "https://www.szhdy.com/newestactivity.html"
       STORAGE_PATH: "/data/lastServers.json"
       CONFIG_ID_MONITOR_ENABLED: "true"
       CONFIG_ID_URL_TEMPLATE: "https://www.szhdy.com/cart?action=configureproduct&pid={id}"
