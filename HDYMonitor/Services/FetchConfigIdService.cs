@@ -87,9 +87,7 @@ namespace HDYMonitor.Services
                     return new FetchActivityResult(true, 204, "Config ID monitor disabled.");
                 }
 
-                using var httpClient = CreateHttpClient();
-
-                var initResult = await EnsureInitializedAsync(httpClient, cancellationToken);
+                var initResult = await EnsureInitializedAsync(cancellationToken);
                 if (!initResult.Success)
                 {
                     return initResult;
@@ -108,7 +106,7 @@ namespace HDYMonitor.Services
                 while (consecutiveMisses < 3)
                 {
                     var nextId = probeId + 1;
-                    var checkResult = await CheckIdHasContentAsync(httpClient, nextId, cancellationToken);
+                    var checkResult = await CheckIdHasContentAsync(nextId, cancellationToken);
                     probeId = nextId;
 
                     if (!checkResult.HasContent)
@@ -160,7 +158,7 @@ namespace HDYMonitor.Services
                 && !string.Equals(enabled, "false", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static async Task<FetchActivityResult> EnsureInitializedAsync(HttpClient httpClient, CancellationToken cancellationToken)
+        private static async Task<FetchActivityResult> EnsureInitializedAsync(CancellationToken cancellationToken)
         {
             if (_initialized)
             {
@@ -173,7 +171,7 @@ namespace HDYMonitor.Services
             var storedId = await LoadLastIdAsync(cancellationToken);
             var scanStartId = Math.Max(configuredStartId, storedId ?? 0);
 
-            var latestId = await FindLatestAvailableIdAsync(httpClient, scanStartId, scanLimit, cancellationToken);
+            var latestId = await FindLatestAvailableIdAsync(scanStartId, scanLimit, cancellationToken);
             if (latestId is null)
             {
                 return new FetchActivityResult(false, 404, $"Unable to locate a valid config ID from {scanStartId} (scan limit {scanLimit}).");
@@ -185,12 +183,12 @@ namespace HDYMonitor.Services
             return new FetchActivityResult(true, 200, $"Config ID initialized. Last ID={latestId.Value}");
         }
 
-        private static async Task<int?> FindLatestAvailableIdAsync(HttpClient httpClient, int startId, int scanLimit, CancellationToken cancellationToken)
+        private static async Task<int?> FindLatestAvailableIdAsync(int startId, int scanLimit, CancellationToken cancellationToken)
         {
             var currentId = startId;
             for (var i = 0; i <= scanLimit && currentId > 0; i++, currentId--)
             {
-                var result = await CheckIdHasContentAsync(httpClient, currentId, cancellationToken);
+                var result = await CheckIdHasContentAsync(currentId, cancellationToken);
                 if (result.HasContent)
                 {
                     return currentId;
@@ -200,10 +198,11 @@ namespace HDYMonitor.Services
             return null;
         }
 
-        private static async Task<(bool HasContent, ConfigDetails? Details)> CheckIdHasContentAsync(HttpClient httpClient, int id, CancellationToken cancellationToken)
+        private static async Task<(bool HasContent, ConfigDetails? Details)> CheckIdHasContentAsync(int id, CancellationToken cancellationToken)
         {
             var url = BuildUrl(id);
             Console.WriteLine($"[HTTP] GET {url}");
+            using var httpClient = CreateHttpClient();
             using var response = await httpClient.GetAsync(url, cancellationToken);
             var html = await HttpContentReader.ReadAsStringSafeAsync(response.Content, cancellationToken);
 
@@ -220,7 +219,7 @@ namespace HDYMonitor.Services
                 return (false, null);
             }
 
-            var details = ExtractConfigDetails(doc, html);
+            var details = await ExtractConfigDetailsAsync(httpClient, url, doc, html, cancellationToken);
             return (true, details);
         }
 
@@ -231,11 +230,15 @@ namespace HDYMonitor.Services
             return osNode != null && cpuNode != null;
         }
 
-        private static ConfigDetails ExtractConfigDetails(HtmlDocument doc, string html)
+        private static async Task<ConfigDetails> ExtractConfigDetailsAsync(HttpClient httpClient, string pageUrl, HtmlDocument doc, string html, CancellationToken cancellationToken)
         {
             var anchorNode = FindLabelNode(doc, LabelOs);
             var name = ExtractProductName(doc, anchorNode);
             var price = ExtractPrice(doc, html);
+            if (string.IsNullOrWhiteSpace(price))
+            {
+                price = await ExtractPriceFromOrderSummaryAsync(httpClient, pageUrl, doc, cancellationToken);
+            }
             var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var label in ConfigFieldLabels)
@@ -340,6 +343,152 @@ namespace HDYMonitor.Services
             }
 
             return null;
+        }
+
+        private static async Task<string?> ExtractPriceFromOrderSummaryAsync(HttpClient httpClient, string pageUrl, HtmlDocument doc, CancellationToken cancellationToken)
+        {
+            var formNode = doc.DocumentNode.SelectSingleNode("//form[contains(concat(' ', normalize-space(@class), ' '), ' configoption_form ')]");
+            if (formNode == null)
+            {
+                return null;
+            }
+
+            var formValues = BuildOrderSummaryFormValues(formNode);
+            if (formValues.Count == 0)
+            {
+                return null;
+            }
+
+            if (!Uri.TryCreate(pageUrl, UriKind.Absolute, out var pageUri))
+            {
+                return null;
+            }
+
+            var builder = new UriBuilder(pageUri)
+            {
+                Query = $"action=ordersummary&order_frm_tpl=&tpl_type=&date={DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}"
+            };
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, builder.Uri)
+            {
+                Content = new FormUrlEncodedContent(formValues)
+            };
+            request.Headers.Referrer = pageUri;
+
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            var summaryHtml = await HttpContentReader.ReadAsStringSafeAsync(response.Content, cancellationToken);
+            if (!response.IsSuccessStatusCode || string.IsNullOrWhiteSpace(summaryHtml))
+            {
+                return null;
+            }
+
+            var price = ExtractPriceFromText(summaryHtml, allowBareNumber: false);
+            if (!string.IsNullOrWhiteSpace(price))
+            {
+                return price;
+            }
+
+            var summaryDoc = new HtmlDocument();
+            summaryDoc.LoadHtml(summaryHtml);
+            var priceNode = FindNodeByHints(summaryDoc, PriceClassHints);
+            return priceNode == null ? null : ExtractPriceFromNode(priceNode, allowBareNumber: true);
+        }
+
+        private static List<KeyValuePair<string, string>> BuildOrderSummaryFormValues(HtmlNode formNode)
+        {
+            var values = new List<KeyValuePair<string, string>>();
+
+            var inputNodes = formNode.SelectNodes(".//input[@name]");
+            if (inputNodes != null)
+            {
+                foreach (var inputNode in inputNodes)
+                {
+                    var name = inputNode.GetAttributeValue("name", string.Empty);
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        continue;
+                    }
+
+                    var type = inputNode.GetAttributeValue("type", string.Empty);
+                    if ((type.Equals("radio", StringComparison.OrdinalIgnoreCase) || type.Equals("checkbox", StringComparison.OrdinalIgnoreCase))
+                        && inputNode.GetAttributeValue("checked", null) == null)
+                    {
+                        continue;
+                    }
+
+                    var value = inputNode.GetAttributeValue("value", string.Empty);
+                    if (string.IsNullOrWhiteSpace(value)
+                        && type.Equals("hidden", StringComparison.OrdinalIgnoreCase)
+                        && inputNode.GetAttributeValue("data-type", string.Empty).Equals("skyos", StringComparison.OrdinalIgnoreCase))
+                    {
+                        value = ResolveDefaultSkyOsValue(formNode, inputNode);
+                    }
+
+                    values.Add(new KeyValuePair<string, string>(
+                        name,
+                        value));
+                }
+            }
+
+            var selectNodes = formNode.SelectNodes(".//select[@name]");
+            if (selectNodes != null)
+            {
+                foreach (var selectNode in selectNodes)
+                {
+                    var name = selectNode.GetAttributeValue("name", string.Empty);
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        continue;
+                    }
+
+                    var optionNode = selectNode.SelectSingleNode(".//option[@selected]") ?? selectNode.SelectSingleNode(".//option");
+                    if (optionNode == null)
+                    {
+                        continue;
+                    }
+
+                    values.Add(new KeyValuePair<string, string>(
+                        name,
+                        optionNode.GetAttributeValue("value", string.Empty)));
+                }
+            }
+
+            var textareaNodes = formNode.SelectNodes(".//textarea[@name]");
+            if (textareaNodes != null)
+            {
+                foreach (var textareaNode in textareaNodes)
+                {
+                    var name = textareaNode.GetAttributeValue("name", string.Empty);
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        continue;
+                    }
+
+                    values.Add(new KeyValuePair<string, string>(
+                        name,
+                        NormalizeText(textareaNode.InnerText)));
+                }
+            }
+
+            return values;
+        }
+
+        private static string ResolveDefaultSkyOsValue(HtmlNode formNode, HtmlNode inputNode)
+        {
+            var inputId = inputNode.GetAttributeValue("id", string.Empty);
+            if (string.IsNullOrWhiteSpace(inputId))
+            {
+                return string.Empty;
+            }
+
+            var selectedNode = formNode.SelectSingleNode($"(.//li[@data-id='{inputId}' and contains(concat(' ', normalize-space(@class), ' '), ' active ')])[1]");
+            if (selectedNode != null)
+            {
+                return selectedNode.GetAttributeValue("data-osid", string.Empty);
+            }
+
+            var firstNode = formNode.SelectSingleNode($"(.//li[@data-id='{inputId}'])[1]");
+            return firstNode?.GetAttributeValue("data-osid", string.Empty) ?? string.Empty;
         }
 
         private static HtmlNode? FindNodeByHints(HtmlDocument doc, string[] hints)
