@@ -92,10 +92,23 @@ namespace HDYMonitor.Services
                     return new FetchActivityResult(false, 500, "Config ID monitor has no last ID.");
                 }
 
-                var nextId = _lastKnownId.Value + 1;
-                var checkResult = await CheckIdHasContentAsync(httpClient, nextId, cancellationToken);
-                if (checkResult.HasContent)
+                var detectedIds = new List<int>();
+                var lastDetectedId = _lastKnownId.Value;
+                var probeId = _lastKnownId.Value;
+                var consecutiveMisses = 0;
+
+                while (consecutiveMisses < 3)
                 {
+                    var nextId = probeId + 1;
+                    var checkResult = await CheckIdHasContentAsync(httpClient, nextId, cancellationToken);
+                    probeId = nextId;
+
+                    if (!checkResult.HasContent)
+                    {
+                        consecutiveMisses++;
+                        continue;
+                    }
+
                     var url = BuildUrl(nextId);
                     var name = checkResult.Details?.Name;
                     var title = string.IsNullOrWhiteSpace(name)
@@ -103,9 +116,20 @@ namespace HDYMonitor.Services
                         : $"\u65b0\u914d\u7f6e\u4e0a\u7ebf ID={nextId} {name}";
                     var message = BuildConfigMessage(nextId, url, checkResult.Details);
                     await SendHelper.SendPushDeer(title, message);
-                    await SaveLastIdAsync(nextId, cancellationToken);
-                    _lastKnownId = nextId;
-                    return new FetchActivityResult(true, 200, $"New config detected. ID={nextId}");
+
+                    detectedIds.Add(nextId);
+                    lastDetectedId = nextId;
+                    consecutiveMisses = 0;
+                }
+
+                if (detectedIds.Count > 0)
+                {
+                    await SaveLastIdAsync(lastDetectedId, cancellationToken);
+                    _lastKnownId = lastDetectedId;
+                    return new FetchActivityResult(
+                        true,
+                        200,
+                        $"New config detected. IDs={string.Join(",", detectedIds)}");
                 }
 
                 return new FetchActivityResult(true, 200, $"No new config. Last ID={_lastKnownId.Value}");
