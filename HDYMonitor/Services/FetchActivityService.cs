@@ -19,33 +19,8 @@ namespace HDYMonitor.Services
         {
             try
             {
-                // 创建HttpClientHandler以支持自动重定向、cookie和压缩
-                var handler = new HttpClientHandler
+                using (var httpClient = CreateHttpClient())
                 {
-                    AllowAutoRedirect = true,
-                    UseCookies = true,
-                    AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
-                };
-
-                using (var httpClient = new HttpClient(handler))
-                {
-                    // 设置超时时间
-                    httpClient.Timeout = TimeSpan.FromSeconds(30);
-
-                    // 添加完整的浏览器请求头,模拟真实浏览器行为
-                    httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36");
-                    httpClient.DefaultRequestHeaders.Add("Accept", "application/json, text/plain, */*");
-                    httpClient.DefaultRequestHeaders.Add("Accept-Language", "en-US,en;q=0.9");
-                    httpClient.DefaultRequestHeaders.Add("Accept-Encoding", "gzip, deflate, br");
-                    httpClient.DefaultRequestHeaders.Add("DNT", "1");
-                    httpClient.DefaultRequestHeaders.Add("Connection", "keep-alive");
-                    httpClient.DefaultRequestHeaders.Add("Sec-Fetch-Dest", "empty");
-                    httpClient.DefaultRequestHeaders.Add("Sec-Fetch-Mode", "cors");
-                    httpClient.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
-                    httpClient.DefaultRequestHeaders.Add("Referer", "https://www.szhdy.com/");
-                    httpClient.DefaultRequestHeaders.Add("Cache-Control", "no-cache");
-                    httpClient.DefaultRequestHeaders.Add("Pragma", "no-cache");
-
                     var (activityUrls, resolveError) = await ResolveOngoingActivityUrlsAsync(httpClient, cancellationToken);
                     if (resolveError != null)
                     {
@@ -56,8 +31,11 @@ namespace HDYMonitor.Services
                     foreach (var activityUrl in activityUrls)
                     {
                         Console.WriteLine($"[HTTP] GET {activityUrl}");
-                        using var activityResponse = await httpClient.GetAsync(activityUrl, cancellationToken);
-                        var activityHtml = await activityResponse.Content.ReadAsStringAsync(cancellationToken);
+                        using var activityClient = CreateHttpClient();
+                        using var activityRequest = new HttpRequestMessage(HttpMethod.Get, activityUrl);
+                        activityRequest.Headers.Referrer = new Uri(Environment.GetEnvironmentVariable("NEWEST_ACTIVITY_URL") ?? DefaultNewestActivityUrl);
+                        using var activityResponse = await activityClient.SendAsync(activityRequest, cancellationToken);
+                        var activityHtml = await HttpContentReader.ReadAsStringSafeAsync(activityResponse.Content, cancellationToken);
                         Console.WriteLine($"Status ({activityUrl}): {activityResponse.StatusCode}");
 
                         if (IsCloudflareChallenge(activityHtml))
@@ -132,7 +110,7 @@ namespace HDYMonitor.Services
                 Console.WriteLine($"Refreshing ongoing activity URLs (interval: {refreshSeconds}s).");
                 Console.WriteLine($"[HTTP] GET {newestActivityUrl}");
                 using var newestActivityResponse = await httpClient.GetAsync(newestActivityUrl, cancellationToken);
-                var newestActivityHtml = await newestActivityResponse.Content.ReadAsStringAsync(cancellationToken);
+                var newestActivityHtml = await HttpContentReader.ReadAsStringSafeAsync(newestActivityResponse.Content, cancellationToken);
                 Console.WriteLine($"Status ({newestActivityUrl}): {newestActivityResponse.StatusCode}");
 
                 if (IsCloudflareChallenge(newestActivityHtml))
@@ -172,6 +150,37 @@ namespace HDYMonitor.Services
             return int.TryParse(envValue, out var seconds) && seconds > 0
                 ? seconds
                 : DefaultNewestActivityRefreshSeconds;
+        }
+
+        private static HttpClient CreateHttpClient()
+        {
+            var handler = new HttpClientHandler
+            {
+                AllowAutoRedirect = true,
+                UseCookies = true,
+                AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
+            };
+
+            var httpClient = new HttpClient(handler)
+            {
+                Timeout = TimeSpan.FromSeconds(30)
+            };
+
+            httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36");
+            httpClient.DefaultRequestHeaders.Add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            httpClient.DefaultRequestHeaders.Add("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7");
+            httpClient.DefaultRequestHeaders.Add("Accept-Encoding", "gzip, deflate, br");
+            httpClient.DefaultRequestHeaders.Add("DNT", "1");
+            httpClient.DefaultRequestHeaders.Add("Connection", "keep-alive");
+            httpClient.DefaultRequestHeaders.Add("Sec-Fetch-Dest", "document");
+            httpClient.DefaultRequestHeaders.Add("Sec-Fetch-Mode", "navigate");
+            httpClient.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
+            httpClient.DefaultRequestHeaders.Add("Referer", "https://www.szhdy.com/");
+            httpClient.DefaultRequestHeaders.Add("Upgrade-Insecure-Requests", "1");
+            httpClient.DefaultRequestHeaders.Add("Cache-Control", "no-cache");
+            httpClient.DefaultRequestHeaders.Add("Pragma", "no-cache");
+
+            return httpClient;
         }
 
         private static List<string> ExtractOngoingActivityUrls(string htmlContent, string newestActivityUrl)
@@ -244,7 +253,8 @@ namespace HDYMonitor.Services
                     server.Core ?? string.Empty,
                     server.Memory ?? string.Empty,
                     server.SystemDisk ?? string.Empty,
-                    server.Bandwidth ?? string.Empty);
+                    server.Bandwidth ?? string.Empty,
+                    server.Term ?? string.Empty);
 
                 if (!merged.TryGetValue(key, out var existing))
                 {

@@ -1,4 +1,5 @@
 using Aliyun.Base.Utils;
+using HDYMonitor.Utils;
 using HtmlAgilityPack;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -172,7 +173,7 @@ namespace HDYMonitor.Services
             var url = BuildUrl(id);
             Console.WriteLine($"[HTTP] GET {url}");
             using var response = await httpClient.GetAsync(url, cancellationToken);
-            var html = await response.Content.ReadAsStringAsync(cancellationToken);
+            var html = await HttpContentReader.ReadAsStringSafeAsync(response.Content, cancellationToken);
 
             if (!response.IsSuccessStatusCode || string.IsNullOrWhiteSpace(html))
             {
