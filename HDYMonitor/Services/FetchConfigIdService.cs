@@ -21,9 +21,17 @@ namespace HDYMonitor.Services
             "\u5185\u5b58",
             "\u7cfb\u7edf\u76d8",
             "\u5e26\u5bbd",
+            "\u5e74\u9650",
             "\u7f51\u7edc\u7c7b\u578b",
             "IP\u6570\u91cf",
             "\u6570\u636e\u76d8"
+        };
+        private static readonly string[] TermLabelCandidates =
+        {
+            "\u5e74\u9650",
+            "\u65f6\u957f",
+            "\u5468\u671f",
+            "\u8d2d\u4e70\u65f6\u957f"
         };
         private static readonly string[] HeadingDenyList =
         {
@@ -232,6 +240,11 @@ namespace HDYMonitor.Services
 
             foreach (var label in ConfigFieldLabels)
             {
+                if (string.Equals(label, "\u5e74\u9650", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
                 var labelNode = FindLabelNode(doc, label);
                 if (labelNode is null)
                 {
@@ -243,6 +256,12 @@ namespace HDYMonitor.Services
                 {
                     fields[label] = value;
                 }
+            }
+
+            var term = ExtractTerm(doc, html);
+            if (!string.IsNullOrWhiteSpace(term))
+            {
+                fields["\u5e74\u9650"] = term;
             }
 
             return new ConfigDetails(name, price, fields);
@@ -522,6 +541,47 @@ namespace HDYMonitor.Services
             }
 
             return string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        }
+
+        private static string? ExtractTerm(HtmlDocument doc, string html)
+        {
+            foreach (var label in TermLabelCandidates)
+            {
+                var labelNode = FindLabelNode(doc, label);
+                if (labelNode == null)
+                {
+                    continue;
+                }
+
+                var value = FindNextMeaningfulText(labelNode);
+                var normalizedValue = NormalizeTerm(value);
+                if (!string.IsNullOrWhiteSpace(normalizedValue))
+                {
+                    return normalizedValue;
+                }
+            }
+
+            var text = NormalizeText(doc.DocumentNode.InnerText);
+            var textMatch = Regex.Match(text, @"(?<term>一次性|(?:\d+|[一二三四五六七八九十百两个]+)(?:个?月|年|天))");
+            if (textMatch.Success)
+            {
+                return textMatch.Groups["term"].Value;
+            }
+
+            var htmlMatch = Regex.Match(html, @"(?<term>一次性|(?:\d+|[一二三四五六七八九十百两个]+)(?:个?月|年|天))");
+            return htmlMatch.Success ? htmlMatch.Groups["term"].Value : null;
+        }
+
+        private static string? NormalizeTerm(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return null;
+            }
+
+            var normalized = NormalizeText(value);
+            var match = Regex.Match(normalized, @"(?<term>一次性|(?:\d+|[一二三四五六七八九十百两个]+)(?:个?月|年|天))");
+            return match.Success ? match.Groups["term"].Value : null;
         }
 
         private static string BuildUrl(int id)
