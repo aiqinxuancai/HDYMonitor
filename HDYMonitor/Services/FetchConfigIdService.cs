@@ -13,7 +13,6 @@ namespace HDYMonitor.Services
         private const int DefaultStartId = 2018;
         private const int DefaultBackwardScanLimit = 200;
         private static readonly string LabelOs = "\u64cd\u4f5c\u7cfb\u7edf";
-        private static readonly string LabelName = "\u540d\u79f0";
         private static readonly string[] ConfigFieldLabels =
         {
             "\u8282\u70b9id",
@@ -22,8 +21,6 @@ namespace HDYMonitor.Services
             "\u7cfb\u7edf\u76d8",
             "\u5e26\u5bbd",
             "\u5e74\u9650",
-            "\u7f51\u7edc\u7c7b\u578b",
-            "IP\u6570\u91cf",
             "\u6570\u636e\u76d8"
         };
         private static readonly string[] TermLabelCandidates =
@@ -32,6 +29,10 @@ namespace HDYMonitor.Services
             "\u65f6\u957f",
             "\u5468\u671f",
             "\u8d2d\u4e70\u65f6\u957f"
+        };
+        private static readonly Dictionary<string, string[]> FieldLabelCandidates = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["\u5e26\u5bbd"] = new[] { "\u5e26\u5bbd", "\u5cf0\u503c\u5e26\u5bbd" }
         };
         private static readonly string[] HeadingDenyList =
         {
@@ -248,13 +249,13 @@ namespace HDYMonitor.Services
                     continue;
                 }
 
-                var labelNode = FindLabelNode(doc, label);
+                var labelNode = FindFieldLabelNode(doc, label);
                 if (labelNode is null)
                 {
                     continue;
                 }
 
-                var value = FindNextMeaningfulText(labelNode);
+                var value = NormalizeFieldValue(label, FindNextMeaningfulText(labelNode));
                 if (!string.IsNullOrWhiteSpace(value))
                 {
                     fields[label] = value;
@@ -279,11 +280,6 @@ namespace HDYMonitor.Services
 
             if (details != null)
             {
-                if (!string.IsNullOrWhiteSpace(details.Name))
-                {
-                    lines.Add($"{LabelName}: {details.Name}");
-                }
-
                 if (!string.IsNullOrWhiteSpace(details.Price))
                 {
                     lines.Add($"\u4ef7\u683c: {details.Price}");
@@ -382,14 +378,20 @@ namespace HDYMonitor.Services
                 return null;
             }
 
+            var summaryDoc = new HtmlDocument();
+            summaryDoc.LoadHtml(summaryHtml);
+            var displayedPrice = ExtractOrderSummaryDisplayedPrice(summaryDoc);
+            if (!string.IsNullOrWhiteSpace(displayedPrice))
+            {
+                return displayedPrice;
+            }
+
             var price = ExtractPriceFromText(summaryHtml, allowBareNumber: false);
             if (!string.IsNullOrWhiteSpace(price))
             {
                 return price;
             }
 
-            var summaryDoc = new HtmlDocument();
-            summaryDoc.LoadHtml(summaryHtml);
             var priceNode = FindNodeByHints(summaryDoc, PriceClassHints);
             return priceNode == null ? null : ExtractPriceFromNode(priceNode, allowBareNumber: true);
         }
@@ -503,6 +505,82 @@ namespace HDYMonitor.Services
             return doc.DocumentNode.SelectSingleNode($"//*[{predicates}]");
         }
 
+        private static string? NormalizeFieldValue(string label, string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+
+            return label switch
+            {
+                "\u7cfb\u7edf\u76d8" => ExtractDefaultSizedValue(value),
+                "\u6570\u636e\u76d8" => ExtractDefaultSizedValue(value),
+                "\u5e26\u5bbd" => ExtractDefaultBandwidthValue(value),
+                _ => value
+            };
+        }
+
+        private static string ExtractDefaultSizedValue(string value)
+        {
+            var normalized = NormalizeText(value);
+            var matches = Regex.Matches(
+                normalized,
+                @"\d+(?:\.\d+)?\s*(?:Kbps|Mbps|Gbps|Tbps|MB|GB|TB|GiB|MiB)",
+                RegexOptions.IgnoreCase);
+
+            if (matches.Count > 0)
+            {
+                return matches[0].Value.Replace(" ", string.Empty);
+            }
+
+            return normalized;
+        }
+
+        private static string ExtractDefaultBandwidthValue(string value)
+        {
+            var normalized = NormalizeText(value);
+            var matches = Regex.Matches(
+                normalized,
+                @"\d+(?:\.\d+)?\s*(?:Kbps|Mbps|Gbps|Tbps)",
+                RegexOptions.IgnoreCase);
+
+            if (matches.Count > 0)
+            {
+                return matches[0].Value.Replace(" ", string.Empty);
+            }
+
+            var numberMatch = Regex.Match(normalized, @"\d+(?:\.\d+)?");
+            if (numberMatch.Success)
+            {
+                return $"{numberMatch.Value}Mbps";
+            }
+
+            return normalized;
+        }
+
+        private static string? ExtractOrderSummaryDisplayedPrice(HtmlDocument summaryDoc)
+        {
+            var priceNode = summaryDoc.DocumentNode.SelectSingleNode(
+                "//*[contains(concat(' ', normalize-space(@class), ' '), ' ordersummarybottom-price ')]");
+            if (priceNode == null)
+            {
+                return null;
+            }
+
+            var priceText = NormalizeText(priceNode.InnerText).Replace(",", string.Empty);
+            var priceMatch = Regex.Match(priceText, @"[0-9]+(?:\.[0-9]+)?");
+            if (!priceMatch.Success)
+            {
+                return null;
+            }
+
+            var prefixNode = summaryDoc.DocumentNode.SelectSingleNode(
+                "//*[contains(concat(' ', normalize-space(@class), ' '), ' ordersummarybottom-prefix ')]");
+            var prefix = NormalizeText(prefixNode?.InnerText);
+            return string.IsNullOrWhiteSpace(prefix) ? priceMatch.Value : $"{prefix}{priceMatch.Value}";
+        }
+
         private static string? ExtractPriceFromNode(HtmlNode node, bool allowBareNumber)
         {
             foreach (var attr in node.Attributes)
@@ -536,10 +614,15 @@ namespace HDYMonitor.Services
             }
 
             var normalized = NormalizeText(text);
-            var match = Regex.Match(normalized, "(?:\\u00a5|\\uffe5)\\s*(?<value>[0-9]+(?:\\.[0-9]+)?)|(?<value2>[0-9]+(?:\\.[0-9]+)?)\\s*\\u5143");
-            if (match.Success)
+            var matches = Regex.Matches(normalized, "(?:\\u00a5|\\uffe5)\\s*(?<value>[0-9]+(?:\\.[0-9]+)?)|(?<value2>[0-9]+(?:\\.[0-9]+)?)\\s*\\u5143");
+            foreach (Match match in matches)
             {
-                return match.Value;
+                if (!match.Success)
+                {
+                    continue;
+                }
+
+                return match.Value.Replace(",", string.Empty);
             }
 
             if (!allowBareNumber)
@@ -547,8 +630,18 @@ namespace HDYMonitor.Services
                 return null;
             }
 
-            match = Regex.Match(normalized, "^[0-9]+(?:\\.[0-9]+)?$");
-            return match.Success ? match.Value : null;
+            matches = Regex.Matches(normalized, "[0-9]+(?:\\.[0-9]+)?");
+            foreach (Match match in matches)
+            {
+                if (!match.Success)
+                {
+                    continue;
+                }
+
+                return match.Value;
+            }
+
+            return null;
         }
 
         private static HtmlNode? FindLabelNode(HtmlDocument doc, string label)
@@ -566,6 +659,25 @@ namespace HDYMonitor.Services
             }
 
             return FindExactLabelNode(doc, $"{label}\uFF1A");
+        }
+
+        private static HtmlNode? FindFieldLabelNode(HtmlDocument doc, string label)
+        {
+            if (FieldLabelCandidates.TryGetValue(label, out var candidates))
+            {
+                foreach (var candidate in candidates)
+                {
+                    var node = FindLabelNode(doc, candidate);
+                    if (node != null)
+                    {
+                        return node;
+                    }
+                }
+
+                return null;
+            }
+
+            return FindLabelNode(doc, label);
         }
 
         private static HtmlNode? FindExactLabelNode(HtmlDocument doc, string label)
