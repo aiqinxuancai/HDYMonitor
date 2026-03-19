@@ -1,6 +1,7 @@
 using Aliyun.Base.Utils;
 using HDYMonitor.Utils;
 using HtmlAgilityPack;
+using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Text.Json;
@@ -21,6 +22,7 @@ namespace HDYMonitor.Services
             "\u7cfb\u7edf\u76d8",
             "\u5e26\u5bbd",
             "\u5e74\u9650",
+            "\u5e93\u5b58",
             "\u6570\u636e\u76d8"
         };
         private static readonly string[] TermLabelCandidates =
@@ -78,6 +80,7 @@ namespace HDYMonitor.Services
 
         private sealed record ConfigIdState(int LastId, DateTimeOffset UpdatedAt);
         private sealed record ConfigDetails(string? Name, string? Price, IReadOnlyDictionary<string, string> Fields);
+        private sealed record OrderSummaryInfo(string? Price, string? Stock);
 
         public static async Task<FetchActivityResult> CheckAndNotifyAsync(CancellationToken cancellationToken = default)
         {
@@ -236,9 +239,10 @@ namespace HDYMonitor.Services
             var anchorNode = FindLabelNode(doc, LabelOs);
             var name = ExtractProductName(doc, anchorNode);
             var price = ExtractPrice(doc, html);
+            var orderSummaryInfo = await ExtractOrderSummaryInfoAsync(httpClient, pageUrl, doc, cancellationToken);
             if (string.IsNullOrWhiteSpace(price))
             {
-                price = await ExtractPriceFromOrderSummaryAsync(httpClient, pageUrl, doc, cancellationToken);
+                price = orderSummaryInfo.Price;
             }
             var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -266,6 +270,11 @@ namespace HDYMonitor.Services
             if (!string.IsNullOrWhiteSpace(term))
             {
                 fields["\u5e74\u9650"] = term;
+            }
+
+            if (!string.IsNullOrWhiteSpace(orderSummaryInfo.Stock))
+            {
+                fields["\u5e93\u5b58"] = orderSummaryInfo.Stock;
             }
 
             return new ConfigDetails(name, price, fields);
@@ -341,23 +350,23 @@ namespace HDYMonitor.Services
             return null;
         }
 
-        private static async Task<string?> ExtractPriceFromOrderSummaryAsync(HttpClient httpClient, string pageUrl, HtmlDocument doc, CancellationToken cancellationToken)
+        private static async Task<OrderSummaryInfo> ExtractOrderSummaryInfoAsync(HttpClient httpClient, string pageUrl, HtmlDocument doc, CancellationToken cancellationToken)
         {
             var formNode = doc.DocumentNode.SelectSingleNode("//form[contains(concat(' ', normalize-space(@class), ' '), ' configoption_form ')]");
             if (formNode == null)
             {
-                return null;
+                return new OrderSummaryInfo(null, null);
             }
 
             var formValues = BuildOrderSummaryFormValues(formNode);
             if (formValues.Count == 0)
             {
-                return null;
+                return new OrderSummaryInfo(null, null);
             }
 
             if (!Uri.TryCreate(pageUrl, UriKind.Absolute, out var pageUri))
             {
-                return null;
+                return new OrderSummaryInfo(null, null);
             }
 
             var builder = new UriBuilder(pageUri)
@@ -375,25 +384,97 @@ namespace HDYMonitor.Services
             var summaryHtml = await HttpContentReader.ReadAsStringSafeAsync(response.Content, cancellationToken);
             if (!response.IsSuccessStatusCode || string.IsNullOrWhiteSpace(summaryHtml))
             {
-                return null;
+                return new OrderSummaryInfo(null, null);
             }
 
             var summaryDoc = new HtmlDocument();
             summaryDoc.LoadHtml(summaryHtml);
+
+            var stock = ExtractStockFromOrderSummary(summaryHtml);
             var displayedPrice = ExtractOrderSummaryDisplayedPrice(summaryDoc);
             if (!string.IsNullOrWhiteSpace(displayedPrice))
             {
-                return displayedPrice;
+                return new OrderSummaryInfo(displayedPrice, stock);
             }
 
             var price = ExtractPriceFromText(summaryHtml, allowBareNumber: false);
             if (!string.IsNullOrWhiteSpace(price))
             {
-                return price;
+                return new OrderSummaryInfo(price, stock);
             }
 
             var priceNode = FindNodeByHints(summaryDoc, PriceClassHints);
-            return priceNode == null ? null : ExtractPriceFromNode(priceNode, allowBareNumber: true);
+            return new OrderSummaryInfo(
+                priceNode == null ? null : ExtractPriceFromNode(priceNode, allowBareNumber: true),
+                stock);
+        }
+
+        private static string? ExtractStockFromOrderSummary(string summaryHtml)
+        {
+            if (string.IsNullOrWhiteSpace(summaryHtml))
+            {
+                return null;
+            }
+
+            var match = Regex.Match(
+                summaryHtml,
+                @"var\s+products\s*=\s*(?<json>\{.*?\});",
+                RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            if (!match.Success)
+            {
+                return null;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(match.Groups["json"].Value);
+                var root = document.RootElement;
+
+                var hasStockControl = TryGetInt32(root, "stock_control", out var stockControl);
+                var hasQty = TryGetInt32(root, "qty", out var qty);
+
+                if (hasStockControl && stockControl == 1)
+                {
+                    if (hasQty)
+                    {
+                        return qty <= 0 ? "\u65e0\u5e93\u5b58" : qty.ToString(CultureInfo.InvariantCulture);
+                    }
+
+                    return "\u5e93\u5b58\u63a7\u5236";
+                }
+
+                if (hasQty)
+                {
+                    return qty.ToString(CultureInfo.InvariantCulture);
+                }
+
+                return hasStockControl ? "\u4e0d\u9650\u91cf" : null;
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
+        }
+
+        private static bool TryGetInt32(JsonElement root, string propertyName, out int value)
+        {
+            value = 0;
+            if (!root.TryGetProperty(propertyName, out var property))
+            {
+                return false;
+            }
+
+            if (property.ValueKind == JsonValueKind.Number)
+            {
+                return property.TryGetInt32(out value);
+            }
+
+            if (property.ValueKind == JsonValueKind.String)
+            {
+                return int.TryParse(property.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+            }
+
+            return false;
         }
 
         private static List<KeyValuePair<string, string>> BuildOrderSummaryFormValues(HtmlNode formNode)
